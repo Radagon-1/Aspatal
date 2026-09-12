@@ -1,4 +1,7 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -7,9 +10,17 @@ from app.deps import require_assigned_actor
 from app.models import Patient, User
 from app.schemas.patient import PatientCreate, PatientOut
 from app.services import referral_workflow as workflow
-from app.services.idempotency import get_replayed_response, record_operation
+from app.services.idempotency import (
+    get_replayed_response,
+    record_operation,
+    resolve_create_by_client_entity_id,
+)
 
 router = APIRouter(tags=["patients"])
+
+# Practical safety cap on an unfiltered/broad lookup -- not pagination
+# (not asked for), just a sane ceiling on result size.
+_SEARCH_LIMIT = 50
 
 EP_CREATE = "/api/patients"
 
@@ -27,6 +38,15 @@ def create_patient(
     replay = get_replayed_response(db, idempotency_key, EP_CREATE, expected_entity_id)
     if replay is not None:
         return replay
+
+    # Same target, different operation key: return the existing patient
+    # rather than attempting a duplicate insert that would fail purely on
+    # the primary key already existing (baseline-hardening fix E).
+    existing_result = resolve_create_by_client_entity_id(
+        db, Patient, expected_entity_id, PatientOut, idempotency_key, EP_CREATE
+    )
+    if existing_result is not None:
+        return existing_result
 
     patient = workflow.create_patient(
         db,
@@ -53,6 +73,26 @@ def create_patient(
         raise HTTPException(status_code=409, detail="Conflicting create operation")
 
     return out
+
+
+@router.get("/patients", response_model=list[PatientOut])
+def search_patients(
+    query: Optional[str] = None,
+    actor: User = Depends(require_assigned_actor),
+    db: Session = Depends(get_db),
+):
+    """
+    Practical lookup for the worker "does this patient already exist"
+    workflow -- case-insensitive substring match against full_name and,
+    where present, phone. No fuzzy/AI matching -- exact substring, sorted
+    deterministically. `/patients` (no path param) and `/patients/{id}`
+    are distinct route shapes, so this never conflicts with get_patient.
+    """
+    q = db.query(Patient)
+    if query:
+        pattern = f"%{query}%"
+        q = q.filter(or_(Patient.full_name.ilike(pattern), Patient.phone.ilike(pattern)))
+    return q.order_by(Patient.full_name, Patient.id).limit(_SEARCH_LIMIT).all()
 
 
 @router.get("/patients/{patient_id}", response_model=PatientOut)

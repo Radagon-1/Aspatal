@@ -29,7 +29,11 @@ from app.schemas.consultation import ConsultationOutcomeCreate
 from app.schemas.follow_up import FollowUpCreate
 from app.schemas.referral import ReasonPayload, ReferralCreate, ReferralEventOut, ReferralOut
 from app.services import referral_workflow as workflow
-from app.services.idempotency import get_replayed_response, record_operation
+from app.services.idempotency import (
+    get_replayed_response,
+    record_operation,
+    resolve_create_by_client_entity_id,
+)
 
 router = APIRouter(tags=["referrals"])
 
@@ -94,6 +98,15 @@ def create_referral(
     if replay is not None:
         return replay
 
+    # Same target, different operation key: return the existing referral
+    # as-is -- do NOT call workflow.create_referral again, since that would
+    # append a second REFERRAL_ASSIGNED event (baseline-hardening fix E).
+    existing_result = resolve_create_by_client_entity_id(
+        db, Referral, expected_entity_id, ReferralOut, idempotency_key, EP_CREATE
+    )
+    if existing_result is not None:
+        return existing_result
+
     referral, _event = workflow.create_referral(
         db,
         actor,
@@ -132,6 +145,7 @@ def get_referral(
 def list_referrals(
     status: Optional[ReferralStatus] = None,
     facility_id: Optional[str] = None,
+    overdue: Optional[bool] = None,
     actor: User = Depends(require_assigned_actor),
     db: Session = Depends(get_db),
 ):
@@ -140,6 +154,8 @@ def list_referrals(
         query = query.filter(Referral.status == status)
     if facility_id is not None:
         query = query.filter(Referral.assigned_facility_id == facility_id)
+    if overdue is not None:
+        query = workflow.apply_overdue_filter(query, overdue)
     return query.order_by(Referral.created_at.desc()).all()
 
 

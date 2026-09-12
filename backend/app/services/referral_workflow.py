@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import and_
 from sqlalchemy.orm import Query, Session
 
 from app.db import utcnow
@@ -480,6 +481,27 @@ def scope_referrals_query(query: Query, actor: User) -> Query:
     if actor.role == UserRole.WORKER:
         return query.filter(Referral.created_by == actor.id)
     raise ForbiddenError("Unassigned users have no workflow access")
+
+
+def apply_overdue_filter(query: Query, overdue: bool, now: Optional[datetime] = None) -> Query:
+    """
+    GET /api/referrals?overdue= filter. Reuses the EXACT same overdue
+    predicate as list_overdue_follow_ups below (FollowUp still PENDING and
+    its due_date has passed) -- this is the only overdue semantic actually
+    persisted and implemented in this codebase. There is no ASSIGNED/
+    CONFIRMED duration-based overdue threshold anywhere in the models or
+    config; inventing one here was explicitly out of scope for this fix.
+
+    overdue=True  -> referrals whose linked FollowUp is overdue.
+    overdue=False -> everything else, including referrals with no
+    FollowUp at all (a referral that was never given a follow-up isn't
+    "overdue" by this definition -- it simply isn't in scope of it).
+    """
+    now = now or utcnow()
+    is_overdue = Referral.follow_up.has(
+        and_(FollowUp.status == FollowUpStatus.PENDING, FollowUp.due_date < now)
+    )
+    return query.filter(is_overdue) if overdue else query.filter(~is_overdue)
 
 
 def list_overdue_follow_ups(db: Session, actor: User, now: Optional[datetime] = None) -> list[FollowUp]:
