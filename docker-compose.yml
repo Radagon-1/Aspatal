@@ -1,0 +1,85 @@
+services:
+  # ─── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aspatal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aspatal
+      POSTGRES_PASSWORD: aspatal123
+      POSTGRES_DB: aspatal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aspatal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── Python Triage Engine ─────────────────────────────────
+  triage-engine:
+    build:
+      context: ./triage-engine
+      dockerfile: Dockerfile
+    container_name: aspatal-triage
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Node.js Backend ──────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aspatal-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://aspatal:aspatal123@postgres:5432/aspatal?schema=public
+      PORT: 5000
+      NODE_ENV: development
+      JWT_SECRET: aspatal_dev_jwt_secret_change_in_prod
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_SECRET: aspatal_dev_refresh_secret_change_in_prod
+      JWT_REFRESH_EXPIRES_IN: 7d
+      FRONTEND_URL: http://localhost:5173
+      TRIAGE_ENGINE_URL: http://triage-engine:8000
+      ADMIN_EMAIL: admin@aspatal.in
+      ADMIN_PASSWORD: admin123
+      GOOGLE_CLIENT_ID: ""
+      GOOGLE_CLIENT_SECRET: ""
+      GOOGLE_CALLBACK_URL: http://localhost:5000/api/auth/google/callback
+    depends_on:
+      postgres:
+        condition: service_healthy
+      triage-engine:
+        condition: service_healthy
+    volumes:
+      # hot-reload: mount source, exclude node_modules
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+
+  # ─── React Frontend ────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aspatal-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:5000/api
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
