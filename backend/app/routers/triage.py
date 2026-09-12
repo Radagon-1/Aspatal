@@ -1,72 +1,38 @@
 """
-Rural Healthcare Triage API
-----------------------------
-A single-file FastAPI service that accepts patient symptom data and uses
-the Groq API (Llama model) to return a structured triage assessment.
+Triage endpoint — accepts patient symptom data and uses the Groq API
+(Llama model) to return a structured triage assessment.
 
-INSTALL:
-    pip install fastapi uvicorn groq pydantic
-
-RUN:
-    python main.py
-    (or: uvicorn main:app --host 0.0.0.0 --port 8000 --reload)
-
-TEST:
-    curl -X POST http://127.0.0.1:8000/triage \
-      -H "Content-Type: application/json" \
-      -d '{"name": "Ramesh Kumar", "age": 45, "raw_symptoms": "chest pain, sweating, shortness of breath since 1 hour"}'
-
-NOTE ON CORS:
-    By default, FastAPI only registers the HTTP methods you explicitly
-    define on a route (e.g. POST for /triage). It does NOT auto-handle
-    the OPTIONS "preflight" request that browsers send before a
-    cross-origin POST — that's what causes the "405 Method Not Allowed
-    on OPTIONS" / CORS error you were seeing. Adding CORSMiddleware
-    below fixes this: it intercepts OPTIONS preflight requests and
-    responds to them automatically, and it adds the Access-Control-*
-    headers to real responses so the browser accepts them.
+Moved from the original single-file main.py during the repo restructuring;
+logic is unchanged.
 """
-
 import json
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from groq import Groq
 
-# --------------------------------------------------------------------------
-# CONFIGURATION — PASTE YOUR ACTUAL GROQ API KEY BELOW
-# --------------------------------------------------------------------------
-GROQ_API_KEY = "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"
+from app.config import GROQ_API_KEY, GROQ_MODEL
 
-# Model to use for triage reasoning. Llama 3.3 70B (via Groq) is a strong,
-# fast default for this kind of structured clinical-style task.
-GROQ_MODEL = "openai/gpt-oss-120b"
+router = APIRouter()
 
-# --------------------------------------------------------------------------
-# INITIALIZE APP
-# --------------------------------------------------------------------------
-app = FastAPI(title="Rural Healthcare Triage API")
+# The Groq client is constructed lazily, on first real use, not at import
+# time — importing this module (and everything that imports it, including
+# app.main) must succeed even when GROQ_API_KEY isn't configured, so that
+# persistence tooling (Alembic, seed scripts, pytest) never needs a Groq key
+# just to load the app. See app/config.py.
+_groq_client = None
 
-# --------------------------------------------------------------------------
-# CORS MIDDLEWARE — must be added before any requests are handled.
-# allow_origins=["*"] means ANY frontend/domain can call this API.
-# allow_methods=["*"] and allow_headers=["*"] ensure preflight (OPTIONS)
-# requests succeed for any method/header combination the browser sends,
-# which resolves the 405 on OPTIONS you were hitting.
-# NOTE: allow_credentials must stay False when allow_origins is "*" —
-# browsers reject the combination of wildcard origin + credentials=True.
-# --------------------------------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# The Groq client is initialized once at startup using the embedded key above.
-groq_client = Groq(api_key=GROQ_API_KEY)
+def get_groq_client() -> Groq:
+    global _groq_client
+    if _groq_client is None:
+        if not GROQ_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="GROQ_API_KEY is not configured on this server.",
+            )
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
 
 
 # --------------------------------------------------------------------------
@@ -125,7 +91,7 @@ Yellow over Green)."""
 # --------------------------------------------------------------------------
 # ENDPOINT
 # --------------------------------------------------------------------------
-@app.post("/triage", response_model=TriageResponse)
+@router.post("/triage", response_model=TriageResponse)
 def triage_patient(request: TriageRequest):
     """
     Accepts patient details + raw symptoms, sends them to Groq (Llama model)
@@ -144,7 +110,7 @@ def triage_patient(request: TriageRequest):
     try:
         # Call the Groq chat completion API. response_format is set to
         # json_object to force strict, parseable JSON output.
-        completion = groq_client.chat.completions.create(
+        completion = get_groq_client().chat.completions.create(
             model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -189,11 +155,3 @@ def triage_patient(request: TriageRequest):
         clinical_summary=result["clinical_summary"],
         recommended_action=result["recommended_action"],
     )
-
-
-# --------------------------------------------------------------------------
-# ENTRY POINT — allows running with `python main.py`
-# --------------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
