@@ -52,7 +52,16 @@ client `id` given), a retry's response is validated by endpoint alone, not
 by entity, because the entity ID doesn't exist yet at the time the
 Idempotency-Key is chosen -- there is nothing to bind to until after the
 first attempt runs. This phase does not add request-body hashing to close
-that gap; it is out of scope per the Phase 6.2 instructions.
+that gap; it is out of scope per this and the Phase 6.2 instructions.
+
+Baseline-hardening addition (see resolve_create_by_client_entity_id below):
+when the client DOES supply an explicit entity ID, and that same ID was
+already created successfully under a DIFFERENT operation key (the offline
+queue's realistic retry case -- a new key chosen for what is, in fact, the
+same logical create), the create endpoint now returns the existing entity
+instead of letting the insert fail solely because the primary key already
+exists. This closes the client-generated-ID half of the create-endpoint
+gap described above; the server-generated-ID half remains as documented.
 """
 import json
 from typing import Any, Optional
@@ -125,3 +134,42 @@ def record_operation(
             response_body=json.dumps(response_body),
         )
     )
+
+
+def resolve_create_by_client_entity_id(
+    db: Session,
+    model: type,
+    entity_id: Optional[str],
+    out_schema: type,
+    operation_id: str,
+    endpoint: str,
+    success_status: int = 201,
+):
+    """
+    For create endpoints where the client may supply its own entity UUID
+    (offline-safe creation -- Patient/Assessment/Referral). Handles the case
+    where that entity ID was already created successfully under a
+    DIFFERENT operation key: rather than let the insert fail solely on the
+    primary key already existing, return the existing entity, and bind
+    this new operation key to it too (so a future retry of *this* key also
+    replays cleanly, same as any other idempotent key).
+
+    Returns None if entity_id is None, or the entity doesn't exist yet --
+    in either case the caller should proceed with normal creation. Returns
+    the existing entity's response otherwise. Does not check the earlier
+    get_replayed_response() case -- callers run that first, as always;
+    this only covers the "same target, different key" gap that check
+    doesn't (each key is naturally different, so it can't find a match by
+    operation_id alone).
+    """
+    if entity_id is None:
+        return None
+    existing = db.get(model, entity_id)
+    if existing is None:
+        return None
+
+    out = out_schema.model_validate(existing)
+    body = out.model_dump(mode="json")
+    record_operation(db, operation_id, endpoint, entity_id, success_status, body)
+    db.commit()
+    return out

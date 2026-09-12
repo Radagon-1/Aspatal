@@ -1,6 +1,7 @@
 """
-Tests 28-29: facility service-name filtering, and unknown-ID error
-responses.
+Tests 28-29 + Fix C: facility `service`/`active` filtering (canonical
+public param is `service`, not the internal `service_name` model column
+name), and unknown-ID error responses.
 """
 from conftest import actor_headers, idem_key
 
@@ -9,7 +10,7 @@ from conftest import actor_headers, idem_key
 def test_facility_filtering_by_service(client, worker, facility, other_facility):
     # `facility` fixture offers General OPD + X-Ray; `other_facility` offers
     # only General OPD (see conftest.py factories).
-    resp = client.get("/api/facilities", params={"service_name": "X-Ray"}, headers=actor_headers(worker))
+    resp = client.get("/api/facilities", params={"service": "X-Ray"}, headers=actor_headers(worker))
     assert resp.status_code == 200
     names = [f["name"] for f in resp.json()]
     assert facility.name in names
@@ -27,6 +28,30 @@ def test_facility_filtering_by_active(client, worker, facility, db_session):
     names = [f["name"] for f in resp.json()]
     assert facility.name in names
     assert "Closed Facility" not in names
+
+
+def test_facility_filtering_by_service_and_active_together(client, worker, facility, other_facility, db_session):
+    from app.models import Facility
+
+    inactive_with_xray = Facility(name="Closed X-Ray Facility", type="PHC", active=False)
+    db_session.add(inactive_with_xray)
+    db_session.commit()
+    from app.models import FacilityService
+
+    db_session.add(
+        FacilityService(facility_id=inactive_with_xray.id, service_name="X-Ray", available=True)
+    )
+    db_session.commit()
+
+    resp = client.get(
+        "/api/facilities",
+        params={"service": "X-Ray", "active": True},
+        headers=actor_headers(worker),
+    )
+    names = [f["name"] for f in resp.json()]
+    assert facility.name in names
+    assert "Closed X-Ray Facility" not in names  # excluded by active=True
+    assert other_facility.name not in names  # excluded by service filter
 
 
 # 29. unknown patient/facility/referral returns appropriate error

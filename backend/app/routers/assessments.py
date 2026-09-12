@@ -7,7 +7,11 @@ from app.deps import require_assigned_actor
 from app.models import Assessment, User
 from app.schemas.assessment import AssessmentCreate, AssessmentOut
 from app.services import referral_workflow as workflow
-from app.services.idempotency import get_replayed_response, record_operation
+from app.services.idempotency import (
+    get_replayed_response,
+    record_operation,
+    resolve_create_by_client_entity_id,
+)
 
 router = APIRouter(tags=["assessments"])
 
@@ -27,6 +31,14 @@ def create_assessment(
     replay = get_replayed_response(db, idempotency_key, EP_CREATE, expected_entity_id)
     if replay is not None:
         return replay
+
+    # Same target, different operation key: return the existing assessment
+    # rather than attempting a duplicate insert (baseline-hardening fix E).
+    existing_result = resolve_create_by_client_entity_id(
+        db, Assessment, expected_entity_id, AssessmentOut, idempotency_key, EP_CREATE
+    )
+    if existing_result is not None:
+        return existing_result
 
     assessment = workflow.create_assessment(
         db,

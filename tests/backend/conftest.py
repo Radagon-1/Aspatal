@@ -24,17 +24,23 @@ if str(BACKEND_DIR) not in sys.path:
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 import app.models  # noqa: E402,F401  (registers every table on Base.metadata)
-from app.db import Base  # noqa: E402
+from app.db import Base, enable_sqlite_foreign_keys  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 
 @pytest.fixture()
 def db_session():
-    """A fresh, empty, disposable SQLite-file-backed database per test."""
+    """A fresh, empty, disposable SQLite-file-backed database per test.
+
+    Applies the same enable_sqlite_foreign_keys() the real application
+    engine uses (app/db.py) -- this engine is a separate instance for test
+    isolation, but the FK-enforcement configuration must be identical to
+    what the application actually runs, not a re-implementation of it."""
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    enable_sqlite_foreign_keys(engine)
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine)
     session = session_factory()

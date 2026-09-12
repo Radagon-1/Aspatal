@@ -13,17 +13,21 @@ router = APIRouter(tags=["facilities"])
 
 @router.get("/facilities", response_model=list[FacilityOut])
 def list_facilities(
+    service: Optional[str] = None,
     active: Optional[bool] = None,
-    service_name: Optional[str] = None,
     actor: User = Depends(require_assigned_actor),
     db: Session = Depends(get_db),
 ):
+    """`service` is the canonical public query parameter name (the frozen
+    contract's GET /api/facilities?service=&active=) -- it maps internally
+    to FacilityService.service_name, which stays as the model/column name
+    since that's an internal implementation detail, not the API surface."""
     query = db.query(Facility)
     if active is not None:
         query = query.filter(Facility.active == active)
-    if service_name is not None:
+    if service is not None:
         query = query.join(FacilityService).filter(
-            FacilityService.service_name == service_name,
+            FacilityService.service_name == service,
             FacilityService.available.is_(True),
         )
     return query.all()
